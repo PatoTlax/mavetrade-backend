@@ -58,14 +58,18 @@ async def scan_patterns(request: ScanRequest):
         print(f"📊 Downloading {ticker}...")
         
         data = yf.download(
-            ticker, 
-            start=request.start_date, 
-            end=request.end_date, 
-            interval=interval,
-            progress=False
-        )
+    ticker, 
+    start=request.start_date, 
+    end=request.end_date, 
+    interval=interval,
+    progress=False
+)
+
+# Aplanar columnas MultiIndex
+if isinstance(data.columns, pd.MultiIndex):
+    data.columns = data.columns.get_level_values(0)
         
-        if data.empty:
+        if data.empty
             raise HTTPException(status_code=404, detail="No data available")
         
         print(f"✅ Downloaded {len(data)} candles")
@@ -75,8 +79,7 @@ async def scan_patterns(request: ScanRequest):
         patterns = analyze_patterns(data, movements)
         
         return {
-            "success": True,
-            "total_candles": len(data),
+            "success": True            "total_candles": len(data),
             "total_movements": len(movements),
             "patterns": patterns[:10],
             "date_range": f"{request.start_date} to {request.end_date}"
