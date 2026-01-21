@@ -74,10 +74,10 @@ async def scan_patterns(request: ScanRequest):
         
         print(f"✅ Downloaded {len(data)} candles")
         
-data = calculate_indicators(data)
-movements = identify_movements(data, request.min_pips, request.direction)
-patterns = analyze_patterns(data, movements)
-statistics = calculate_statistics(movements)  # ← NUEVO
+	data = calculate_indicators(data)
+	movements = identify_movements(data, request.min_pips, request.direction)
+	patterns = analyze_patterns(data, movements)
+	statistics = calculate_statistics(movements)  # ← NUEVO
 
 return {
     "success": True,
