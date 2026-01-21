@@ -103,7 +103,10 @@ def calculate_indicators(data: pd.DataFrame) -> pd.DataFrame:
 def identify_movements(data: pd.DataFrame, min_pips: float, direction: str) -> List[Dict]:
     movements = []
     pip_multiplier = 10000
-    data_list = data.reset_index().to_dict('records')
+    
+    # Reset index para que Date sea una columna
+    data = data.reset_index()
+    data_list = data.to_dict('records')
     
     for i in range(len(data_list) - 10):
         entry_price = data_list[i]['Close']
@@ -119,6 +122,9 @@ def identify_movements(data: pd.DataFrame, min_pips: float, direction: str) -> L
             movement_up = (max_high - entry_price) * pip_multiplier
             movement_down = (entry_price - min_low) * pip_multiplier
             
+            # Obtener timestamp (puede ser Date o Datetime dependiendo del timeframe)
+            entry_time = data_list[i].get('Date') or data_list[i].get('Datetime') or str(i)
+            
             if (direction in ['buy', 'both']) and movement_up >= min_pips:
                 movements.append({
                     'index': i,
@@ -127,7 +133,7 @@ def identify_movements(data: pd.DataFrame, min_pips: float, direction: str) -> L
                     'entry_price': entry_price,
                     'target_price': max_high,
                     'duration_bars': j - i,
-                    'entry_time': str(data_list[i]['Date'])
+                    'entry_time': str(entry_time)
                 })
                 break
             
@@ -139,7 +145,7 @@ def identify_movements(data: pd.DataFrame, min_pips: float, direction: str) -> L
                     'entry_price': entry_price,
                     'target_price': min_low,
                     'duration_bars': j - i,
-                    'entry_time': str(data_list[i]['Date'])
+                    'entry_time': str(entry_time)
                 })
                 break
     
