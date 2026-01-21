@@ -74,17 +74,19 @@ async def scan_patterns(request: ScanRequest):
         
         print(f"✅ Downloaded {len(data)} candles")
         
-        data = calculate_indicators(data)
-        movements = identify_movements(data, request.min_pips, request.direction)
-        patterns = analyze_patterns(data, movements)
-        
-        return {
-            "success": True,
-            "total_candles": len(data),
-            "total_movements": len(movements),
-            "patterns": patterns[:10],
-            "date_range": f"{request.start_date} to {request.end_date}"
-        }
+data = calculate_indicators(data)
+movements = identify_movements(data, request.min_pips, request.direction)
+patterns = analyze_patterns(data, movements)
+statistics = calculate_statistics(movements)  # ← NUEVO
+
+return {
+    "success": True,
+    "total_candles": len(data),
+    "total_movements": len(movements),
+    "patterns": patterns[:10],
+    "date_range": f"{request.start_date} to {request.end_date}",
+    "statistics": statistics  # ← NUEVO
+}
         
     except Exception as e:
         print(f"❌ Error: {str(e)}")
@@ -112,17 +114,30 @@ def identify_movements(data: pd.DataFrame, min_pips: float, direction: str) -> L
         entry_price = data_list[i]['Close']
         max_high = entry_price
         min_low = entry_price
+        max_drawdown_pips = 0  # ← NUEVO
         
         for j in range(i + 1, min(i + 11, len(data_list))):
+            # Actualizar máximos y mínimos
             if data_list[j]['High'] > max_high:
                 max_high = data_list[j]['High']
             if data_list[j]['Low'] < min_low:
                 min_low = data_list[j]['Low']
             
+            # Calcular drawdown durante el movimiento (NUEVO)
+            if direction in ['buy', 'both']:
+                current_drawdown = (entry_price - data_list[j]['Low']) * pip_multiplier
+                if current_drawdown > max_drawdown_pips:
+                    max_drawdown_pips = current_drawdown
+            
+            if direction in ['sell', 'both']:
+                current_drawdown = (data_list[j]['High'] - entry_price) * pip_multiplier
+                if current_drawdown > max_drawdown_pips:
+                    max_drawdown_pips = current_drawdown
+            
             movement_up = (max_high - entry_price) * pip_multiplier
             movement_down = (entry_price - min_low) * pip_multiplier
             
-            # Obtener timestamp (puede ser Date o Datetime dependiendo del timeframe)
+            # Obtener timestamp
             entry_time = data_list[i].get('Date') or data_list[i].get('Datetime') or str(i)
             
             if (direction in ['buy', 'both']) and movement_up >= min_pips:
@@ -133,7 +148,8 @@ def identify_movements(data: pd.DataFrame, min_pips: float, direction: str) -> L
                     'entry_price': entry_price,
                     'target_price': max_high,
                     'duration_bars': j - i,
-                    'entry_time': str(entry_time)
+                    'entry_time': str(entry_time),
+                    'max_drawdown': max_drawdown_pips  # ← NUEVO
                 })
                 break
             
@@ -145,11 +161,89 @@ def identify_movements(data: pd.DataFrame, min_pips: float, direction: str) -> L
                     'entry_price': entry_price,
                     'target_price': min_low,
                     'duration_bars': j - i,
-                    'entry_time': str(entry_time)
+                    'entry_time': str(entry_time),
+                    'max_drawdown': max_drawdown_pips  # ← NUEVO
                 })
                 break
     
     return movements
+
+def calculate_statistics(movements: List[Dict]) -> Dict:
+    """Calcula estadísticas reales y SL recomendado"""
+    
+    if not movements:
+        return {
+            'sl_aggressive': 0,
+            'sl_balanced': 0,
+            'sl_conservative': 0,
+            'stats_by_sl': []
+        }
+    
+    import numpy as np
+    
+    # Extraer todos los drawdowns
+    drawdowns = [m['max_drawdown'] for m in movements]
+    
+    # Calcular percentiles para SL recomendado
+    sl_aggressive = float(np.percentile(drawdowns, 50))  # P50 (Mediana)
+    sl_balanced = float(np.percentile(drawdowns, 75))    # P75
+    sl_conservative = float(np.percentile(drawdowns, 90)) # P90
+    
+    # Calcular estadísticas para cada nivel de SL
+    stats_by_sl = []
+    
+    for sl_level, sl_value in [
+        ('Aggressive', sl_aggressive),
+        ('Balanced', sl_balanced),
+        ('Conservative', sl_conservative)
+    ]:
+        winning_trades = []
+        losing_trades = []
+        
+        for m in movements:
+            if m['max_drawdown'] > sl_value:
+                # Perdedora: tocó SL antes del target
+                losing_trades.append(sl_value)
+            else:
+                # Ganadora: llegó al target sin tocar SL
+                winning_trades.append(m['pips'])
+        
+        total_trades = len(winning_trades) + len(losing_trades)
+        win_count = len(winning_trades)
+        loss_count = len(losing_trades)
+        
+        # Win Rate
+        win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
+        
+        # Profit Factor
+        total_profit = sum(winning_trades) if winning_trades else 0
+        total_loss = sum(losing_trades) if losing_trades else 0
+        profit_factor = (total_profit / total_loss) if total_loss > 0 else 0
+        
+        # Expectativa
+        avg_win = (total_profit / win_count) if win_count > 0 else 0
+        avg_loss = sl_value
+        expectancy = (win_rate/100 * avg_win) - ((1 - win_rate/100) * avg_loss)
+        
+        stats_by_sl.append({
+            'level': sl_level,
+            'sl_pips': round(sl_value, 2),
+            'win_rate': round(win_rate, 2),
+            'total_trades': total_trades,
+            'winning_trades': win_count,
+            'losing_trades': loss_count,
+            'profit_factor': round(profit_factor, 2),
+            'avg_win': round(avg_win, 2),
+            'avg_loss': round(avg_loss, 2),
+            'expectancy': round(expectancy, 2)
+        })
+    
+    return {
+        'sl_aggressive': round(sl_aggressive, 2),
+        'sl_balanced': round(sl_balanced, 2),
+        'sl_conservative': round(sl_conservative, 2),
+        'stats_by_sl': stats_by_sl
+    }
 
 def analyze_patterns(data: pd.DataFrame, movements: List[Dict]) -> List[Dict]:
     patterns = []
