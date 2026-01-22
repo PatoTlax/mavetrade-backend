@@ -5,6 +5,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from typing import List, Dict
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
 
 app = FastAPI(title="MaveTrade Pattern Scanner API")
 
@@ -30,6 +32,15 @@ TIMEFRAME_MAP = {
     '1h': '1h',
     '4h': '4h',
     '1d': '1d',
+}
+
+# Pip values per 0.01 lot
+PIP_VALUES = {
+    'EURUSD': 0.10,
+    'GBPUSD': 0.10,
+    'USDJPY': 0.10,
+    'XAUUSD': 1.00,
+    'BTCUSD': 0.10,
 }
 
 class ScanRequest(BaseModel):
@@ -76,7 +87,7 @@ async def scan_patterns(request: ScanRequest):
         
         data = calculate_indicators(data)
         movements = identify_movements(data, request.min_pips, request.direction)
-        patterns = analyze_patterns(data, movements)
+        patterns = analyze_patterns(data, movements, request.symbol, request.min_pips)
         statistics = calculate_statistics(movements)
         
         return {
@@ -164,10 +175,11 @@ def identify_movements(data: pd.DataFrame, min_pips: float, direction: str) -> L
     
     return movements
 
-def analyze_patterns(data: pd.DataFrame, movements: List[Dict]) -> List[Dict]:
+def analyze_patterns(data: pd.DataFrame, movements: List[Dict], symbol: str, target_pips: float) -> List[Dict]:
     patterns = []
     data_list = data.reset_index().to_dict('records')
     
+    # PATRÓN 1: RSI Oversold Buy
     rsi_oversold = [
         m for m in movements 
         if m['direction'] == 'buy' and m['index'] > 0
@@ -176,19 +188,14 @@ def analyze_patterns(data: pd.DataFrame, movements: List[Dict]) -> List[Dict]:
     ]
     
     if len(rsi_oversold) >= 5:
-        buy_movements = [m for m in movements if m['direction'] == 'buy']
+        pattern_stats = calculate_pattern_statistics(rsi_oversold, symbol, 0.01, target_pips)
         patterns.append({
             'id': 1,
             'conditions': ['RSI < 35', 'Direction: Buy'],
-            'winrate': (len(rsi_oversold) / len(buy_movements) * 100) if buy_movements else 0,
-            'total_events': len(rsi_oversold),
-            'winning_events': len(rsi_oversold),
-            'avg_profit': sum(m['pips'] for m in rsi_oversold) / len(rsi_oversold),
-            'max_drawdown': 0,
-            'avg_duration_hours': sum(m['duration_bars'] for m in rsi_oversold) / len(rsi_oversold),
-            'best_hours': []
+            **pattern_stats
         })
     
+    # PATRÓN 2: EMA Cross
     ema_cross = []
     for m in movements:
         if m['index'] < 2:
@@ -207,19 +214,130 @@ def analyze_patterns(data: pd.DataFrame, movements: List[Dict]) -> List[Dict]:
                 ema_cross.append(m)
     
     if len(ema_cross) >= 5:
+        pattern_stats = calculate_pattern_statistics(ema_cross, symbol, 0.01, target_pips)
         patterns.append({
             'id': 2,
             'conditions': ['EMA(20) crosses EMA(50)', 'Direction matches cross'],
-            'winrate': (len(ema_cross) / len(movements) * 100) if movements else 0,
-            'total_events': len(ema_cross),
-            'winning_events': len(ema_cross),
-            'avg_profit': sum(m['pips'] for m in ema_cross) / len(ema_cross),
-            'max_drawdown': 0,
-            'avg_duration_hours': sum(m['duration_bars'] for m in ema_cross) / len(ema_cross),
-            'best_hours': []
+            **pattern_stats
         })
     
-    return sorted(patterns, key=lambda x: x['winrate'], reverse=True)
+    return sorted(patterns, key=lambda x: x.get('net_profit_usd', 0), reverse=True)
+
+def calculate_pattern_statistics(pattern_movements: List[Dict], symbol: str, lot_size: float, target_pips: float) -> Dict:
+    """Calcula estadísticas completas para un patrón específico"""
+    
+    if not pattern_movements:
+        return {}
+    
+    pip_value = PIP_VALUES.get(symbol, 0.10)
+    
+    # Calcular SL óptimo para este patrón
+    drawdowns = [m['max_drawdown'] for m in pattern_movements]
+    sl_aggressive = float(np.percentile(drawdowns, 50))
+    sl_balanced = float(np.percentile(drawdowns, 75))
+    sl_conservative = float(np.percentile(drawdowns, 90))
+    
+    # Usar SL balanceado para estadísticas
+    recommended_sl = sl_balanced
+    
+    # Clasificar trades como ganadores/perdedores
+    winning_trades = []
+    losing_trades = []
+    
+    for m in pattern_movements:
+        if m['max_drawdown'] > recommended_sl:
+            losing_trades.append(m)
+        else:
+            winning_trades.append(m)
+    
+    total_trades = len(pattern_movements)
+    win_count = len(winning_trades)
+    loss_count = len(losing_trades)
+    
+    # Win Rate
+    win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
+    
+    # Profit/Loss en pips
+    total_profit_pips = sum(m['pips'] for m in winning_trades) if winning_trades else 0
+    total_loss_pips = loss_count * recommended_sl
+    net_profit_pips = total_profit_pips - total_loss_pips
+    
+    # Profit/Loss en USD
+    total_profit_usd = total_profit_pips * pip_value * lot_size
+    total_loss_usd = total_loss_pips * pip_value * lot_size
+    net_profit_usd = net_profit_pips * pip_value * lot_size
+    
+    # Profit Factor
+    profit_factor = (total_profit_pips / total_loss_pips) if total_loss_pips > 0 else 0
+    
+    # Expectancy
+    avg_win_pips = (total_profit_pips / win_count) if win_count > 0 else 0
+    avg_loss_pips = recommended_sl
+    expectancy_pips = (win_rate/100 * avg_win_pips) - ((1 - win_rate/100) * avg_loss_pips)
+    expectancy_usd = expectancy_pips * pip_value * lot_size
+    
+    # Max Consecutive Losses/Wins
+    consecutive_losses = calculate_max_consecutive(pattern_movements, recommended_sl, 'loss')
+    consecutive_wins = calculate_max_consecutive(pattern_movements, recommended_sl, 'win')
+    
+    # Max Drawdown
+    max_drawdown_pips = max(drawdowns) if drawdowns else 0
+    max_drawdown_usd = max_drawdown_pips * pip_value * lot_size
+    
+    # Required Capital (Max Drawdown × 4)
+    required_capital_usd = max_drawdown_usd * 4
+    
+    # Max Single Loss
+    max_single_loss_usd = recommended_sl * pip_value * lot_size
+    
+    # Duration
+    avg_duration_hours = sum(m['duration_bars'] for m in pattern_movements) / total_trades if total_trades > 0 else 0
+    
+    return {
+        'win_rate': round(win_rate, 2),
+        'profit_factor': round(profit_factor, 2),
+        'expectancy_pips': round(expectancy_pips, 2),
+        'expectancy_usd': round(expectancy_usd, 2),
+        'total_trades': total_trades,
+        'winning_trades': win_count,
+        'losing_trades': loss_count,
+        'sl_recommended_pips': round(recommended_sl, 2),
+        'target_pips': target_pips,
+        'total_profit_pips': round(total_profit_pips, 2),
+        'total_loss_pips': round(total_loss_pips, 2),
+        'net_profit_pips': round(net_profit_pips, 2),
+        'total_profit_usd': round(total_profit_usd, 2),
+        'total_loss_usd': round(total_loss_usd, 2),
+        'net_profit_usd': round(net_profit_usd, 2),
+        'max_consecutive_losses': consecutive_losses,
+        'max_consecutive_wins': consecutive_wins,
+        'max_drawdown_pips': round(max_drawdown_pips, 2),
+        'max_drawdown_usd': round(max_drawdown_usd, 2),
+        'max_single_loss_usd': round(max_single_loss_usd, 2),
+        'required_capital_usd': round(required_capital_usd, 2),
+        'avg_duration_hours': round(avg_duration_hours, 1),
+        'avg_win_pips': round(avg_win_pips, 2),
+        'avg_loss_pips': round(avg_loss_pips, 2),
+    }
+
+def calculate_max_consecutive(movements: List[Dict], sl: float, result_type: str) -> int:
+    """Calcula la racha máxima de ganancias o pérdidas consecutivas"""
+    max_streak = 0
+    current_streak = 0
+    
+    for m in movements:
+        is_winner = m['max_drawdown'] <= sl
+        
+        if result_type == 'win' and is_winner:
+            current_streak += 1
+            max_streak = max(max_streak, current_streak)
+        elif result_type == 'loss' and not is_winner:
+            current_streak += 1
+            max_streak = max(max_streak, current_streak)
+        else:
+            current_streak = 0
+    
+    return max_streak
 
 def calculate_statistics(movements: List[Dict]) -> Dict:
     if not movements:
