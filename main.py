@@ -5,8 +5,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from typing import List, Dict
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
 
 app = FastAPI(title="MaveTrade Pattern Scanner API")
 
@@ -34,12 +32,21 @@ TIMEFRAME_MAP = {
     '1d': '1d',
 }
 
-# Pip values per 0.01 lot
+# Pip multipliers por símbolo (cuánto multiplicar para convertir a pips)
+PIP_MULTIPLIERS = {
+    'EURUSD': 10000,   # 1 pip = 0.0001
+    'GBPUSD': 10000,   # 1 pip = 0.0001
+    'USDJPY': 100,     # 1 pip = 0.01
+    'XAUUSD': 100,     # 1 pip = 0.10 (Gold es diferente!)
+    'BTCUSD': 1,       # 1 pip = 1.00
+}
+
+# Pip values en USD por 0.01 lot
 PIP_VALUES = {
     'EURUSD': 0.10,
     'GBPUSD': 0.10,
     'USDJPY': 0.10,
-    'XAUUSD': 1.00,
+    'XAUUSD': 1.00,    # Gold vale más por pip
     'BTCUSD': 0.10,
 }
 
@@ -86,9 +93,9 @@ async def scan_patterns(request: ScanRequest):
         print(f"✅ Downloaded {len(data)} candles")
         
         data = calculate_indicators(data)
-        movements = identify_movements(data, request.min_pips, request.direction)
+        movements = identify_movements(data, request.min_pips, request.direction, request.symbol)
         patterns = analyze_patterns(data, movements, request.symbol, request.min_pips)
-        statistics = calculate_statistics(movements)
+        statistics = calculate_statistics(movements, request.symbol)
         
         return {
             "success": True,
@@ -113,9 +120,13 @@ def calculate_indicators(data: pd.DataFrame) -> pd.DataFrame:
     data['EMA_50'] = data['Close'].ewm(span=50, adjust=False).mean()
     return data
 
-def identify_movements(data: pd.DataFrame, min_pips: float, direction: str) -> List[Dict]:
+def identify_movements(data: pd.DataFrame, min_pips: float, direction: str, symbol: str) -> List[Dict]:
     movements = []
-    pip_multiplier = 10000
+    
+    # Obtener multiplicador correcto según el símbolo
+    pip_multiplier = PIP_MULTIPLIERS.get(symbol, 10000)
+    
+    print(f"🔧 Using pip multiplier: {pip_multiplier} for {symbol}")
     
     data = data.reset_index()
     data_list = data.to_dict('records')
@@ -188,7 +199,7 @@ def analyze_patterns(data: pd.DataFrame, movements: List[Dict], symbol: str, tar
     ]
     
     if len(rsi_oversold) >= 5:
-        pattern_stats = calculate_pattern_statistics(rsi_oversold, symbol, 0.01, target_pips)
+        pattern_stats = calculate_pattern_statistics(rsi_oversold, symbol, target_pips)
         patterns.append({
             'id': 1,
             'conditions': ['RSI < 35', 'Direction: Buy'],
@@ -214,7 +225,7 @@ def analyze_patterns(data: pd.DataFrame, movements: List[Dict], symbol: str, tar
                 ema_cross.append(m)
     
     if len(ema_cross) >= 5:
-        pattern_stats = calculate_pattern_statistics(ema_cross, symbol, 0.01, target_pips)
+        pattern_stats = calculate_pattern_statistics(ema_cross, symbol, target_pips)
         patterns.append({
             'id': 2,
             'conditions': ['EMA(20) crosses EMA(50)', 'Direction matches cross'],
@@ -223,7 +234,7 @@ def analyze_patterns(data: pd.DataFrame, movements: List[Dict], symbol: str, tar
     
     return sorted(patterns, key=lambda x: x.get('net_profit_usd', 0), reverse=True)
 
-def calculate_pattern_statistics(pattern_movements: List[Dict], symbol: str, lot_size: float, target_pips: float) -> Dict:
+def calculate_pattern_statistics(pattern_movements: List[Dict], symbol: str, target_pips: float) -> Dict:
     """Calcula estadísticas completas para un patrón específico"""
     
     if not pattern_movements:
@@ -262,10 +273,10 @@ def calculate_pattern_statistics(pattern_movements: List[Dict], symbol: str, lot
     total_loss_pips = loss_count * recommended_sl
     net_profit_pips = total_profit_pips - total_loss_pips
     
-    # Profit/Loss en USD
-    total_profit_usd = total_profit_pips * pip_value * lot_size
-    total_loss_usd = total_loss_pips * pip_value * lot_size
-    net_profit_usd = net_profit_pips * pip_value * lot_size
+    # Profit/Loss en USD (SIN multiplicar por lot_size - pip_value ya está para 0.01 lot)
+    total_profit_usd = total_profit_pips * pip_value
+    total_loss_usd = total_loss_pips * pip_value
+    net_profit_usd = net_profit_pips * pip_value
     
     # Profit Factor
     profit_factor = (total_profit_pips / total_loss_pips) if total_loss_pips > 0 else 0
@@ -274,7 +285,7 @@ def calculate_pattern_statistics(pattern_movements: List[Dict], symbol: str, lot
     avg_win_pips = (total_profit_pips / win_count) if win_count > 0 else 0
     avg_loss_pips = recommended_sl
     expectancy_pips = (win_rate/100 * avg_win_pips) - ((1 - win_rate/100) * avg_loss_pips)
-    expectancy_usd = expectancy_pips * pip_value * lot_size
+    expectancy_usd = expectancy_pips * pip_value
     
     # Max Consecutive Losses/Wins
     consecutive_losses = calculate_max_consecutive(pattern_movements, recommended_sl, 'loss')
@@ -282,13 +293,13 @@ def calculate_pattern_statistics(pattern_movements: List[Dict], symbol: str, lot
     
     # Max Drawdown
     max_drawdown_pips = max(drawdowns) if drawdowns else 0
-    max_drawdown_usd = max_drawdown_pips * pip_value * lot_size
+    max_drawdown_usd = max_drawdown_pips * pip_value
     
     # Required Capital (Max Drawdown × 4)
     required_capital_usd = max_drawdown_usd * 4
     
     # Max Single Loss
-    max_single_loss_usd = recommended_sl * pip_value * lot_size
+    max_single_loss_usd = recommended_sl * pip_value
     
     # Duration
     avg_duration_hours = sum(m['duration_bars'] for m in pattern_movements) / total_trades if total_trades > 0 else 0
@@ -339,7 +350,7 @@ def calculate_max_consecutive(movements: List[Dict], sl: float, result_type: str
     
     return max_streak
 
-def calculate_statistics(movements: List[Dict]) -> Dict:
+def calculate_statistics(movements: List[Dict], symbol: str) -> Dict:
     if not movements:
         return {
             'sl_aggressive': 0,
