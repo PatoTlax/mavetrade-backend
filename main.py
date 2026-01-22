@@ -37,7 +37,7 @@ PIP_MULTIPLIERS = {
     'EURUSD': 10000,   # 1 pip = 0.0001
     'GBPUSD': 10000,   # 1 pip = 0.0001
     'USDJPY': 100,     # 1 pip = 0.01
-    'XAUUSD': 100,     # 1 pip = 0.10 (Gold es diferente!)
+    'XAUUSD': 10,     # 1 pip = 0.10 (Gold es diferente!)
     'BTCUSD': 1,       # 1 pip = 1.00
 }
 
